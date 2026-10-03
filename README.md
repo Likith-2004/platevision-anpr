@@ -1,19 +1,3 @@
----
-title: PlateVision API
-emoji: 🚗
-colorFrom: blue
-colorTo: green
-sdk: docker
-app_port: 8000
-pinned: false
----
-
-<!--
-The YAML block above is Hugging Face Spaces metadata that configures the Docker
-Space hosting the backend. It MUST stay at the very top (HF only reads front
-matter from the first lines of README.md). GitHub renders it as a small table.
--->
-
 # PlateVision
 
 Indian vehicle number plate detection and recognition. A fine-tuned YOLO model
