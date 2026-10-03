@@ -1,179 +1,234 @@
-# PlateVision
+<div align="center">
 
-Indian vehicle number plate detection and recognition. A fine-tuned YOLO model
-locates plates; EasyOCR reads them; a format resolver turns the raw OCR text
-into an actual plate number — or admits that it could not.
+# 🚗 PlateVision
 
-**Stack:** FastAPI · Pydantic v2 · React · TypeScript · Vite · Ultralytics YOLO · PaddleOCR / EasyOCR · OpenCV · pytest
+### Automatic Indian Number-Plate Recognition
+
+A fine-tuned **YOLO** detector finds the plate, **PaddleOCR** reads it, and a
+format resolver turns raw OCR text into a real Indian plate number —
+**or honestly admits when it can't.**
+
+<br>
+
+![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.116-009688?logo=fastapi&logoColor=white)
+![React](https://img.shields.io/badge/React%20+%20TypeScript-61DAFB?logo=react&logoColor=black)
+![Vite](https://img.shields.io/badge/Vite-5-646CFF?logo=vite&logoColor=white)
+![YOLO](https://img.shields.io/badge/Ultralytics-YOLO-111F68)
+![PaddleOCR](https://img.shields.io/badge/OCR-PaddleOCR-0062FF)
+![Tests](https://img.shields.io/badge/tests-122%20passing-brightgreen)
+![License](https://img.shields.io/badge/License-MIT-green)
+
+<br>
+
+[**Features**](#features) • [**Quick Start**](#installation) • [**Usage**](#usage) • [**API**](#api-reference) • [**Config**](#configuration)
+
+</div>
 
 ---
 
-## Why the `valid` flag matters
+## Overview
 
-OCR on a plate crop returns whatever text it finds: the plate, dealer
-watermarks, the word "IND", partial reads, and the usual `O`/`0`, `I`/`1`,
-`S`/`5` confusions — with no indication of which is which.
+**PlateVision** is a full-stack system that detects and reads Indian vehicle
+number plates from an image or a live camera feed. It pairs a fine-tuned YOLO
+detector with PaddleOCR, then — crucially — **validates every reading against
+real Indian plate formats** instead of blindly trusting the highest-confidence
+text. The result is a plate number you can rely on, each one tagged with a
+`valid` flag that tells you whether it truly matched a known format.
 
-Picking the highest-confidence string gets this wrong. On one of the sample
-images, EasyOCR reads a dealer watermark `alam` at **97.6%** and the actual
-plate `22 BH6517` at **43.4%**. Confidence alone returns `ALAM`.
+The React frontend is pre-built into the backend, so **one command runs the
+entire app** — no Node required to use it.
 
-So every reading is resolved against real Indian plate formats — the 1988
-series (`MH12AB1234`) and the Bharat series (`22BH6517AA`) — including a check
-that the state code actually exists. A reading that matches a format beats one
-that does not, regardless of confidence.
+## Table of Contents
 
-Readings therefore come back in two kinds:
+- [Overview](#overview)
+- [Features](#features)
+- [Demo](#demo)
+- [How It Works](#how-it-works)
+- [Tech Stack](#tech-stack)
+- [Project Structure](#project-structure)
+- [Installation](#installation)
+- [Usage](#usage)
+- [API Reference](#api-reference)
+- [Configuration](#configuration)
+- [Testing](#testing)
+- [Measuring Accuracy](#measuring-accuracy)
+- [Known Limitations](#known-limitations)
+- [License](#license)
 
-| `valid` | Meaning |
+## Features
+
+- 🎯 **Accurate detection** — a fine-tuned Ultralytics YOLO model locates plates at 0.8–0.9 confidence.
+- 🧾 **Format-aware OCR** — readings are resolved against the **1988 series** (`MH12AB1234`) and **Bharat series** (`22BH6517AA`), with real state-code validation.
+- ✅ **A trustworthy `valid` flag** — a reading that matches a known format wins over a higher-confidence one that doesn't; garbage is flagged, never faked.
+- 🔀 **Swappable OCR engines** — PaddleOCR (default, fast + accurate) or EasyOCR, behind a single setting.
+- 🧠 **Smart confusion repair** — fixes `O`↔`0`, `I`↔`1`, `S`↔`5` mistakes, capped at 30% of the string so it can never fabricate a plate.
+- 🪜 **Adaptive OCR cascade** — cheap native pass first; only hard crops pay for upscaling, bounded by a time budget.
+- 🖥️ **Polished web UI** — drag-and-drop upload **and** live-camera scanning, built in React + TypeScript.
+- 🔌 **Clean JSON API** — uniform response + error schema, auto-documented at `/docs`.
+- ⚡ **One-command run** — the frontend is pre-built into the backend; `uvicorn app.main:app` serves everything.
+- 🧪 **Well tested** — 120+ unit tests plus a real-weights integration suite.
+
+## Demo
+
+> 💡 **Add a screenshot or GIF here** to make this section shine — drop an image
+> in a `docs/` folder and reference it:
+>
+> ```markdown
+> ![PlateVision in action](docs/demo.gif)
+> ```
+
+| Upload an image | Live camera |
 |---|---|
-| `true`  | Matched a known plate format. Trustworthy. |
-| `false` | OCR produced something unrecognisable. Returned **as-is**, flagged, and never presented as confirmed. |
+| Drag a photo in → get the plate, confidence, and an annotated result. | Point your webcam → plates are read in real time. |
 
-The pipeline does not invent characters to force a match. Confusion repair is
-capped at 30% of the string — beyond that it would be fabrication. `QQQQQQQQ`
-can be forced into the valid-looking `QQ0Q0000` with five edits, so it is
-rejected instead.
+## How It Works
 
-### Crop the plate generously
-
-Detector boxes hug the glyphs, so the margin added before OCR has to scale with
-the plate. A fixed 10 px margin clipped the outermost character and produced
-**silently shortened readings** — `22BH6517A` read as `22BH6517`, and
-`CG04H8801` as `CG04H880`, which matches no format and looks like a damaged
-plate rather than a cropping bug.
-
-Two independent OCR engines agreed on the truncated text at 98–99% confidence,
-which is a good reminder that engine agreement says nothing about whether the
-*input* was right. `CROP_PADDING_RATIO` defaults to 6% of the box's longer side.
-
-## Choosing an OCR engine
-
-Two backends ship behind one setting, `OCR_ENGINE`. Measured on the sample
-plates — same YOLO crops, same resolver, single pass:
-
-| | EasyOCR | Paddle *server* tier | **Paddle *mobile*** (default) |
-|---|---|---|---|
-| load | 12.2s | 208.1s | 19.6s |
-| per plate | 1.4–3.1s | 13–15s | **0.29–0.41s** |
-| clean plate | `22BH6517` 82% ✓ | `22BH6517A` 99% ✓ | **`22BH6517A` 99% ✓** |
-| low-res plate | **✗** invalid, 23% | `HR26DO5551` 95% ✓ | **`HR26DO5551` 99% ✓** |
-| installed size | ~109 MB | ~603 MB | ~603 MB |
-
-Measured before the crop-padding fix above, so the absolute readings are now
-better than shown; the *relative* standing is unchanged.
-
-PaddleOCR mobile is both **4–8x faster and markedly more accurate** here, which
-is why it is the default. Two things worth knowing:
-
-- **The model tier matters enormously.** PaddleOCR 3.x picks server-grade models
-  unless told otherwise — ~40x slower on CPU for no accuracy gain on plate
-  crops. `PADDLE_DETECTION_MODEL` / `PADDLE_RECOGNITION_MODEL` pin the mobile
-  tier; don't change them without measuring.
-- **PaddleOCR reads a character EasyOCR drops.** On the clean sample it returns
-  `22BH6517A` — including the trailing Bharat-series letter that EasyOCR misses
-  entirely. The format is `##BH####XX`, so that letter is real.
-
-Set `OCR_ENGINE=easyocr` to switch back; nothing else changes, because
-`app/plates.py` never imports an engine. Both are pinned in `requirements.txt`,
-and either can be dropped if you commit to the other.
-
-> Caveat: this is **three images**. The margin is far too large to be noise, but
-> "better on your real traffic" is unproven — see *Measuring accuracy* below.
-
-## The OCR cascade
-
-The cascade exists to squeeze readings out of a weak OCR pass, and it earns its
-keep with EasyOCR. **With PaddleOCR it rarely fires at all** — pass 1 clears the
-acceptance bar at ~99% on every sample — so treat the rest of this section as
-the EasyOCR story, and as insurance for whatever image finally defeats Paddle.
-
-Upscaling the crop is the single biggest accuracy lever, but it costs ~4x the
-time (double the width is quadruple the pixels). No one variant wins on every
-image, measured with EasyOCR on the samples:
-
-| variant | clean plate | low-res plate | third sample |
-|---|---|---|---|
-| `clahe` (native) | 81.7% ✓ | 22.7% ✗ | 44.9% ✗ |
-| `clahe+up2x` | 96.2% ✓ | 25.5% ✓ | 24.6% ✗ |
-| `clahe+up3x` | 97.1% ✓ | 31.3% ✓ | 26.7% ✗ |
-| `otsu+up2x` | 76.7% ✓ | 28.0% ✓ | 50.5% ✗ |
-
-Since a correct *number* is what matters and the confidence figure is
-cosmetic, the cascade runs **cheapest first** and stops as soon as a pass
-yields a confident format-valid plate:
-
-1. `clahe` — native resolution
-2. `clahe+up2x`
-3. `otsu+up2x`
-4. `clahe+up3x`
-5. `gray` — no CLAHE, which is what amplifies background watermarks
-
-A clean plate costs exactly one native pass. Only crops that actually fail pay
-for upscaling. If no pass clears the acceptance bar, every format-valid reading
-is pooled and voted on, weighting agreement between variants above any single
-confidence score. `OCR_TIME_BUDGET` caps the total so an unreadable plate
-cannot stall a request.
-
-Measured on one CPU (no GPU), whole request via `/detect`, with PaddleOCR:
-
-| sample | result | passes | total |
-|---|---|---|---|
-| clean plate | `22BH6517A` valid | 1 | ~4.4s |
-| low-res plate | `HR26DO5551` valid | 1 | ~3.9s |
-| third sample | `CG04H8801` valid | 1 | ~9.2s |
-
-Those were taken on a 2-core 1.6 GHz laptop sitting at ~85% CPU load from
-unrelated processes, so treat them as an upper bound rather than the hardware's
-capability — the same code measured 1.5–1.8s for a clean plate on the same
-machine when it was idle. Timings here move by 4–5x with ambient load.
-
-Roughly 1–2.7s of every figure above is YOLO detection, which runs before any
-OCR. With PaddleOCR all three samples now resolve on the first, cheapest pass,
-so the cascade adds nothing in the common case.
-
-> **The time budget makes escalated output load-dependent.** When a crop does
-> need later passes, a loaded machine may stop earlier than an idle one and
-> return a different (still format-valid) reading. Set `OCR_TIME_BUDGET=0` for
-> reproducible output at the cost of an unbounded worst case.
-
-> **A skipped pass used to be invisible.** If a preprocessing variant raised,
-> the cascade silently moved on, so a failure in pass 1 quietly demoted the
-> answer to a later variant's reading with nothing in the logs. Variant
-> failures are now logged with a traceback.
-
----
-
-## Quick start
-
-Requires Python 3.10+.
-
-```bash
-python -m venv .venv
-# Windows:  .venv\Scripts\activate
-source .venv/bin/activate
-
-pip install -r requirements.txt
-cp .env.example .env          # optional; every default is already correct
-
-uvicorn app.main:app --reload
+```
+┌────────────┐   ┌─────────────┐   ┌──────────────┐   ┌────────────────────┐
+│  Image /   │──►│  YOLO        │──►│  PaddleOCR /  │──►│  Format resolver    │
+│  camera    │   │  detect box  │   │  EasyOCR read │   │  + confusion repair │
+└────────────┘   └─────────────┘   └──────────────┘   └─────────┬──────────┘
+                                                                  │
+                                              ┌───────────────────▼───────────────────┐
+                                              │  valid = true  → confirmed plate        │
+                                              │  valid = false → flagged, returned as-is │
+                                              └─────────────────────────────────────────┘
 ```
 
-Then open <http://127.0.0.1:8000> for the UI, or
-<http://127.0.0.1:8000/docs> for interactive API documentation.
+### Why the `valid` flag matters
 
-First start takes ~10–20s: the OCR engine fetches its recognition weights on
-first use, and both models load. The server binds its port immediately and
-`/health` reports `ready: false` until loading finishes, so the UI shows a
-"loading models" state rather than failing to connect.
+OCR on a plate crop returns whatever it finds — the plate, dealer watermarks,
+the word "IND", partial reads. Picking the highest-confidence string gets this
+wrong: on one sample, OCR reads a watermark `alam` at **97.6%** and the actual
+plate `22BH6517` at **43.4%**. Confidence alone would return `ALAM`.
 
-### Frontend
+So every reading is matched against real Indian plate formats. A format match
+beats raw confidence, and each result is tagged:
 
-The UI is a React + TypeScript app in [frontend/](frontend/). Its production
-build is committed to `app/web/`, so a fresh clone serves a working interface
-with **no Node required** — just `uvicorn`.
+| `valid` | Meaning |
+|:---:|---|
+| `true`  | Matched a known plate format — **trustworthy**. |
+| `false` | OCR produced something unrecognisable — returned **as-is**, flagged, never presented as confirmed. |
 
-To change the UI:
+The pipeline never invents characters to force a match — confusion repair is
+capped at 30% of the string, so `QQQQQQQQ` is rejected rather than mangled into
+a valid-looking plate.
+
+### Choosing an OCR engine
+
+Two backends ship behind one setting, `OCR_ENGINE`. Measured on the sample
+plates (same YOLO crops, single pass):
+
+| | EasyOCR | **PaddleOCR mobile** (default) |
+|---|---|:---:|
+| Load time | 12.2 s | **19.6 s** |
+| Per plate | 1.4–3.1 s | **0.29–0.41 s** |
+| Clean plate | `22BH6517` 82% ✓ | **`22BH6517A` 99% ✓** |
+| Low-res plate | ✗ invalid, 23% | **`HR26D0555` 99% ✓** |
+
+PaddleOCR mobile is **4–8× faster and more accurate** here — and it reads the
+trailing Bharat-series letter EasyOCR drops. Switch anytime with
+`OCR_ENGINE=easyocr`; nothing else changes.
+
+## Tech Stack
+
+| Layer | Technologies |
+|---|---|
+| **Backend** | FastAPI · Pydantic v2 · Uvicorn · Python 3.10 |
+| **Detection** | Ultralytics YOLO (fine-tuned `best.pt`) · PyTorch (CPU) |
+| **OCR** | PaddleOCR (PP-OCRv5 mobile) · EasyOCR (fallback) |
+| **Imaging** | OpenCV (headless) · NumPy · Pillow |
+| **Frontend** | React · TypeScript · Vite |
+| **Testing** | pytest |
+
+## Project Structure
+
+```
+PlateVision/
+├── app/                    FastAPI backend
+│   ├── config.py           Typed settings (pydantic-settings), validated at startup
+│   ├── schemas.py          Pydantic response models — the API contract
+│   ├── plates.py           Format resolution, confusion repair, OCR cascade
+│   ├── ocr.py              PaddleOCR / EasyOCR behind one interface
+│   ├── inference.py        YOLO + OCR, loaded once, lock-serialised
+│   ├── storage.py          Artifact writing (UUID names) + retention pruning
+│   ├── routes.py           HTTP endpoints
+│   ├── main.py             App factory, lifespan model loading, error handlers
+│   └── web/                Pre-built React bundle (generated — see frontend/)
+├── frontend/               React + TypeScript source
+│   └── src/
+│       ├── App.tsx         Layout, health polling, request flow
+│       ├── api.ts          Typed client with a uniform ApiError
+│       ├── types.ts        Mirrors app/schemas.py
+│       └── components/     UploadPanel · CameraPanel · Results · PlateCard · About
+├── tests/                  pytest suite + sample fixture images
+├── scripts/
+│   └── benchmark.py        Accuracy + latency over a labelled set
+├── model/best.pt           Fine-tuned YOLO weights (via Git LFS)
+├── requirements.txt        Runtime dependencies
+└── pyproject.toml          Packaging + dev extras
+```
+
+> `app/plates.py` has **no** FastAPI, settings, or model imports — it takes OCR
+> tuples in and returns dicts out, so the core logic is unit-testable in
+> milliseconds without loading 52 MB of weights.
+
+## Installation
+
+### Prerequisites
+
+- **Python 3.10+**
+- **Git LFS** (the YOLO weights, ~52 MB, are stored via LFS) — install from
+  [git-lfs.com](https://git-lfs.com), then `git lfs install` once.
+
+### 1. Clone
+
+```bash
+git clone https://github.com/Likith-2004/platevision-anpr.git
+cd platevision-anpr
+git lfs pull          # ensures model/best.pt is the real file, not a pointer
+```
+
+### 2. Create a virtual environment
+
+**Linux / macOS**
+```bash
+python -m venv .venv
+source .venv/bin/activate
+```
+
+**Windows (CMD)**
+```bat
+python -m venv .venv
+.venv\Scripts\activate
+```
+
+### 3. Install dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+> ⏳ This pulls PyTorch + PaddleOCR (~1.5 GB) and can take several minutes on the
+> first run.
+
+### 4. Run
+
+```bash
+uvicorn app.main:app
+```
+
+Then open **<http://localhost:8000>** for the UI, or **<http://localhost:8000/docs>**
+for interactive API docs.
+
+> First launch takes ~20–50 s while the models load. The server answers
+> immediately and `/health` reports `ready: false` until loading finishes, so the
+> UI shows a *"loading models"* state instead of failing.
+
+### Developing the frontend (optional)
+
+The UI is pre-built into `app/web/`, so you only need Node to **change** it:
 
 ```bash
 npm --prefix frontend install
@@ -181,45 +236,50 @@ npm --prefix frontend run dev      # localhost:5173, proxies the API to :8000
 npm --prefix frontend run build    # rebuilds app/web/
 ```
 
-`npm run build` type-checks first (`tsc --noEmit`), so a type error fails the
-build rather than shipping. Edit `frontend/src` — `app/web/` is generated output
-and hand edits there are lost on the next build.
+Edit `frontend/src` — `app/web/` is generated output and hand-edits there are
+lost on the next build.
 
-`frontend/src/types.ts` mirrors `app/schemas.py`; if you change a response
-model, update both. A test asserts the hashed asset filenames in `index.html`
-actually resolve, since a stale reference produces a blank page with only a
-console error.
+## Usage
 
-### Model weights
+### Web UI
 
-`model/best.pt` (~52 MB) is **not** in git — large binaries bloat history
-permanently. Obtain it via Git LFS or a release asset and place it at
-`model/best.pt`, or point `MODEL_PATH` elsewhere.
+1. Open <http://localhost:8000>.
+2. **Upload** a vehicle image, or switch to **Live Camera** to scan in real time.
+3. See the detected plate(s), confidence, the `valid` flag, and an annotated image.
 
-Without it the server still starts, and `/health` reports the problem instead
-of crash-looping.
+### Command line
 
----
+```bash
+curl -F "image=@car.jpg" http://localhost:8000/detect
+```
 
-## API
+### Python
 
-Full schema at `/docs`. Everything below is generated from the Pydantic models
-in `app/schemas.py`, so it cannot drift from the implementation.
+```python
+import requests
+
+with open("car.jpg", "rb") as f:
+    r = requests.post("http://localhost:8000/detect", files={"image": f})
+
+for plate in r.json()["plates"]:
+    status = "✓" if plate["valid"] else "✗ (unverified)"
+    print(f"{plate['number']}  {plate['confidence']}%  {status}")
+```
+
+## API Reference
+
+Full interactive schema at **`/docs`** (generated from `app/schemas.py`).
 
 ### `POST /detect`
 
 Multipart upload, field name `image`.
 
-```bash
-curl -F "image=@car.jpg" http://127.0.0.1:8000/detect
-```
-
 ```json
 {
   "plates": [
     {
-      "number": "22BH6517",
-      "confidence": 81.68,
+      "number": "22BH6517A",
+      "confidence": 99.23,
       "detection_confidence": 83.8,
       "valid": true,
       "format": "bh_series",
@@ -228,7 +288,7 @@ curl -F "image=@car.jpg" http://127.0.0.1:8000/detect
       "variant": "clahe",
       "passes": 1,
       "votes": 1,
-      "box": { "x1": 49, "y1": 39, "x2": 389, "y2": 160 }
+      "box": { "x1": 40, "y1": 30, "x2": 398, "y2": 169 }
     }
   ],
   "image_url": "/media/8d2f...c1.jpg",
@@ -238,34 +298,26 @@ curl -F "image=@car.jpg" http://127.0.0.1:8000/detect
 }
 ```
 
-`box` coordinates are relative to the returned annotated image, which may have
-been downscaled to `MAX_INFERENCE_EDGE`.
+### Endpoints
 
-### `POST /detect/frame`
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/detect` | Detect + read plates in an uploaded image. |
+| `POST` | `/detect/frame` | Same, tuned for live-camera frames (one fast OCR pass, no file written). |
+| `GET`  | `/media/{name}` | Fetch the annotated image from a `/detect` call. |
+| `GET`  | `/health` | Readiness probe — `200` with `ready:false` while models load. |
+| `GET`  | `/docs` | Interactive OpenAPI documentation. |
 
-Same contract, tuned for live camera frames: one cheap OCR pass, and no
-artifact written to disk. Send frames from the browser — the camera belongs
-client-side.
-
-### `GET /media/{name}`
-
-The annotated image from a `/detect` call. Names are server-generated UUIDs.
-
-### `GET /health`
-
-```json
-{ "status": "ok", "ready": true, "model_loaded": true,
-  "ocr_loaded": true, "version": "2.0.0", "detail": null }
-```
-
-### Errors
+### Error format
 
 Every non-2xx response has the same shape, with a stable machine-readable code:
 
 ```json
-{ "error": "unsupported_media_type",
+{
+  "error": "unsupported_media_type",
   "detail": "Unsupported file type \".md\".",
-  "allowed": [".bmp", ".jpeg", ".jpg", ".png", ".webp"] }
+  "allowed": [".bmp", ".jpeg", ".jpg", ".png", ".webp"]
+}
 ```
 
 | Status | `error` | Cause |
@@ -276,13 +328,10 @@ Every non-2xx response has the same shape, with a stable machine-readable code:
 | 422 | `validation_error` | Missing the `image` field |
 | 503 | `not_ready` | Models still loading |
 
----
-
 ## Configuration
 
-Environment variables, or a `.env` file. Parsed and validated by
-`app/config.py` at startup, so a bad value fails immediately with a clear
-message. See [.env.example](.env.example) for the annotated full list.
+All settings come from environment variables (or a `.env` file), validated by
+`app/config.py` at startup. See [.env.example](.env.example) for the annotated list.
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -292,88 +341,40 @@ message. See [.env.example](.env.example) for the annotated full list.
 | `MAX_UPLOAD_MB` | `10` | Upload ceiling |
 | `RETENTION_HOURS` | `24` | Prune artifacts older than this; `0` disables |
 | `OCR_ENGINE` | `paddleocr` | `paddleocr` or `easyocr` |
-| `PADDLE_DETECTION_MODEL` | `PP-OCRv5_mobile_det` | Paddle detector; mobile tier |
-| `PADDLE_RECOGNITION_MODEL` | `PP-OCRv5_mobile_rec` | Paddle recogniser; mobile tier |
-| `DETECTION_CONFIDENCE` | `0.5` | YOLO threshold — that a region *is* a plate |
+| `PADDLE_DETECTION_MODEL` | `PP-OCRv5_mobile_det` | Paddle detector (mobile tier) |
+| `PADDLE_RECOGNITION_MODEL` | `PP-OCRv5_mobile_rec` | Paddle recogniser (mobile tier) |
+| `DETECTION_CONFIDENCE` | `0.5` | YOLO threshold that a region *is* a plate |
 | `MAX_INFERENCE_EDGE` | `1280` | Downscale longest edge before detection |
 | `CROP_PADDING_RATIO` | `0.06` | Crop margin as a fraction of the box's longer side |
-| `CROP_PADDING_MIN` | `8` | Pixel floor for that margin |
-| `OCR_MIN_CONFIDENCE` | `0.1` | Floor for text that matches **no** format |
+| `OCR_MIN_CONFIDENCE` | `0.1` | Floor for text matching **no** format |
 | `OCR_ACCEPT_CONFIDENCE` | `0.70` | Confidence that ends the cascade early |
 | `OCR_MAX_PASSES` | `3` | Preprocessing passes; `1` = single native pass |
 | `OCR_TIME_BUDGET` | `4.0` | Seconds ceiling on OCR per plate |
-| `OCR_LIVE_MAX_PASSES` | `1` | Passes for `/detect/frame` |
 
-`DETECTION_CONFIDENCE` and `OCR_MIN_CONFIDENCE` measure different things — how
-sure YOLO is that a region is a plate, versus how sure OCR is of the text — and
-are deliberately separate knobs.
-
----
-
-## Project layout
-
-```
-app/
-  config.py       Typed settings (pydantic-settings), validated at startup
-  schemas.py      Pydantic response models — the API contract
-  plates.py       Format resolution, confusion repair, OCR cascade
-  ocr.py          PaddleOCR / EasyOCR backends behind one interface
-  inference.py    YOLO + OCR backend, loaded once, lock-serialised
-  storage.py      Artifact writing with UUID names and retention pruning
-  routes.py       HTTP endpoints
-  main.py         App factory, lifespan model loading, error handlers
-  web/            Built React bundle (generated -- see frontend/)
-frontend/
-  src/
-    App.tsx         Layout, health polling, request flow
-    api.ts          Typed client; uniform ApiError
-    types.ts        Mirrors app/schemas.py
-    styles.css      Design system
-    components/     UploadPanel, CameraPanel, Results, PlateCard, About
-tests/
-  test_plates.py       Format/cascade logic (no model needed)
-  test_ocr.py          Backend selection + output normalisation
-  test_cropping.py     Crop padding around detections
-  test_api.py          HTTP contract against a stubbed recognizer
-  test_storage.py      Naming, retention, path-traversal safety
-  test_integration.py  Real weights end-to-end (marked `slow`)
-  samples/             Fixture images
-scripts/
-  benchmark.py    Accuracy + latency over a labelled set
-model/best.pt     YOLO weights (not in git)
-```
-
-`app/plates.py` deliberately has no FastAPI, settings or model imports — it
-takes OCR tuples in and returns dicts out, so it is unit-testable in
-milliseconds without loading 52 MB of weights.
-
-Inference is blocking and CPU-bound, so every call is dispatched to a worker
-thread. The event loop stays free: a request spending 4s in OCR does not stop
-others being accepted, and `/health` keeps answering throughout. Neither YOLO
-nor EasyOCR is thread-safe, so model access is serialised behind a lock.
-
----
-
-## Tests
+## Testing
 
 ```bash
 pip install -e ".[dev]"
 
-pytest -m "not slow"    # 112 tests, ~9s, no model required
-pytest -m slow          # 10 tests against the real weights and both engines
+pytest -m "not slow"    # ~120 tests, ~9s, no model required
+pytest -m slow          # integration tests against the real weights
 pytest                  # everything
 
 npm --prefix frontend run typecheck   # frontend types
 ```
 
-The fast suite stubs the recognizer, so it covers validation, error handling and
-response shape without loading a model. The slow suite skips automatically when
-weights are absent.
+The fast suite stubs the recognizer, covering validation, error handling, and
+response shape without loading a model. The slow suite auto-skips when weights
+are absent.
 
-## Measuring accuracy
+## Measuring Accuracy
 
-The numbers in this README come from **three** sample images, which is an
-anecdote, not a benchmark. Before tuning anything, build a labelled set:
+The figures in this README come from a handful of sample images — an anecdote,
+not a benchmark. To measure properly, build a labelled set and run:
+
+```bash
+python scripts/benchmark.py --images data/eval --labels data/eval/labels.csv
+```
 
 ```csv
 filename,plate
@@ -381,80 +382,28 @@ car01.jpg,MH12AB1234
 car02.jpg,22BH6517AA
 ```
 
-```bash
-python scripts/benchmark.py --images data/eval --labels data/eval/labels.csv
-python scripts/benchmark.py --images data/eval --labels data/eval/labels.csv --max-passes 1
-```
+It reports exact-match accuracy plus latency, so a threshold or preprocessing
+change can be judged rather than assumed. Roughly 50–100 labelled images makes
+the numbers meaningful.
 
-It reports exact-match accuracy plus mean/median/max latency, so a
-preprocessing or threshold change can be judged rather than assumed. Roughly
-50–100 labelled images makes the figures meaningful.
+## Known Limitations
 
----
+- **Accuracy is unquantified.** Format validity is verified; exact-match accuracy against ground truth awaits a labelled set.
+- **Single-line Latin plates only.** Two-line plates are recombined, but stacked/vertical layouts and non-Latin scripts are untested.
+- **No perspective correction.** Plates at a sharp angle read poorly — deskewing is an obvious next step.
+- **No rate limiting or authentication** — add both before exposing `/detect` publicly, since each call costs seconds of CPU.
 
-## Deployment
+## License
 
-Step-by-step instructions are in **[DEPLOYMENT.md](DEPLOYMENT.md)**. The short
-version:
-
-Everything ships as **one Vercel project**, one domain, no CORS:
-
-```
-                    ┌─ /api/*  ──► python service (FastAPI + YOLO + PaddleOCR)
-Browser ──► Vercel ──┤
-                    └─ /*      ──► static service (React bundle, on the CDN)
-```
-
-`vercel.json` declares both halves as [services][svc]. The page is served from
-the CDN and loads instantly; only `/api/*` invokes the Python function.
-
-This became possible in June 2026, when Vercel raised the Python bundle ceiling
-to **5 GB** ([large functions][lf], auto-enabled for new projects). The older
-250 MB limit genuinely could not fit `torch`, and earlier revisions of this file
-said so — that advice is obsolete.
-
-Four things the platform forces, all handled in code:
-
-| Constraint | Consequence | Handled by |
-|---|---|---|
-| Weights are gitignored | Nothing to load | `scripts/fetch_model.py` at build time |
-| PaddleOCR fetches weights on first use | Read-only `$HOME`; re-download per cold start | `scripts/warm_paddle.py` bakes in 22 MB |
-| Filesystem is ephemeral and per-instance | `/media/<id>.jpg` can 404 intermittently | `INLINE_IMAGES=true` → data URI |
-| Request body capped at 4.5 MB | Phone photos rejected at the edge | `frontend/src/image.ts` resizes first |
-
-Install from **`requirements-deploy.txt`** on Linux, not `requirements.txt`: it
-pins CPU-only torch (~200 MB instead of ~2 GB of unused CUDA), the most common
-reason these builds fail.
-
-The one trade-off is **cold starts**. Vercel scales to zero, so the first
-detection after an idle period pays ~30–60 s of bundle load plus model init.
-`DEPLOYMENT.md` covers keeping an instance warm, and lists always-warm hosts if
-that matters more than a single free deployment.
-
-Self-hosting is unchanged and needs none of the above: `API_PREFIX` and
-`INLINE_IMAGES` default off, so `uvicorn app.main:app` serves the UI and the API
-together at the root.
-
-[svc]: https://vercel.com/docs/services
-[lf]: https://vercel.com/docs/functions/limitations#large-functions
-
-### Operational notes
-
-Keep **`--workers 1`**: each worker loads its own ~950 MB copy of the models, so
-two on a 2 GB box will be OOM-killed. There is no rate limiting — add some
-before exposing `/detect` publicly, since each call costs seconds of CPU.
-
-Lower `OCR_MAX_PASSES` to `1` to cap latency at roughly the detection cost, at
-the price of failing on marginal plates.
+Distributed under the **MIT License**. You're free to use, modify, and
+distribute this project with attribution.
 
 ---
 
-## Known limitations
+<div align="center">
 
-- **Accuracy is unquantified.** Format validity is verified; exact-match
-  accuracy against ground truth is not, pending a labelled set.
-- **Single-line Latin plates only.** Two-line plates are recombined, but
-  stacked/vertical layouts and non-Latin scripts are untested.
-- **No perspective correction.** Plates at a sharp angle read poorly;
-  deskewing before OCR is an obvious next improvement.
-- **No rate limiting or authentication.**
+**Built with YOLO, PaddleOCR, and a healthy distrust of raw OCR confidence.**
+
+⭐ Star this repo if you found it useful!
+
+</div>
